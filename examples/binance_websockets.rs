@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_tungstenite::tungstenite::Message;
+use binance::errors::Error;
 
 #[tokio::main]
 async fn main() {
@@ -294,23 +295,37 @@ async fn custom_event_loop(logger_tx: UnboundedSender<WebsocketEvent>) {
         });
     web_socket.connect_multiple(streams).await.unwrap(); // check error
     loop {
-        if let Some((ref mut socket, _)) = web_socket.socket {
-            if let Ok(message) = socket.next().await.unwrap() {
-                match message {
-                    Message::Text(msg) => {
-                        if msg.is_empty() {
-                            continue;
-                        }
-                        let event: CombinedStreamEvent<WebsocketEventUntag> = from_str(msg.as_str()).unwrap();
-                        eprintln!("event = {event:?}");
+        if let Some((ref mut connection)) = web_socket.socket {
+            match connection {
+                WebSocketConnection::Direct(ref mut socket, _) => {
+                    if let Some(message) = socket.next().await {
+                        custom_process_message(message.unwrap()).await.unwrap();
                     }
-                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
-                    Message::Close(e) => {
-                        eprintln!("closed stream = {e:?}");
-                        break;
+                }
+                WebSocketConnection::Proxies(ref mut socket, _) => {
+                    if let Some(message) = socket.next().await {
+                        custom_process_message(message.unwrap()).await.unwrap();
                     }
                 }
             }
         }
     }
+}
+
+pub async fn custom_process_message(message: Message) -> binance::errors::Result<()> {
+    match message {
+        Message::Text(msg) => {
+            if msg.is_empty() {
+                return Ok(())
+            }
+            let event: CombinedStreamEvent<WebsocketEventUntag> = from_str(msg.as_str()).unwrap();
+            eprintln!("event = {event:?}");
+        }
+        Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+        Message::Close(e) => {
+            eprintln!("closed stream = {e:?}");
+            return Err(Error::Msg(format!("Disconnected {e:?}")));
+        }
+    }
+    Ok(())
 }

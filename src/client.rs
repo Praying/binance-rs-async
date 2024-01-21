@@ -7,6 +7,7 @@ use reqwest::Response;
 use reqwest::StatusCode;
 use ring::hmac;
 use serde::de;
+use std::env;
 use serde::de::DeserializeOwned;
 
 use crate::errors::error_messages;
@@ -21,6 +22,10 @@ pub struct Client {
     host: String,
 }
 
+const HTTP_PROXY_ENV_KEY:&str = "HTTP_PROXY";
+const HTTPS_PROXY_ENV_KEY:&str = "HTTPS_PROXY";
+
+
 impl Client {
     /// Returns a client based on the specified host and credentials
     /// Credentials do not need to be specified when using public endpoints
@@ -29,6 +34,19 @@ impl Client {
         let mut builder: reqwest::ClientBuilder = reqwest::ClientBuilder::new();
         if let Some(timeout_secs) = timeout {
             builder = builder.timeout(Duration::from_secs(timeout_secs))
+        }
+        // 检查并设置HTTP代理
+        if let Ok(http_proxy) = env::var(HTTP_PROXY_ENV_KEY) {
+            if let Ok(proxy) = reqwest::Proxy::http(&http_proxy) {
+                builder = builder.proxy(proxy);
+            }
+        }
+
+        // 检查并设置HTTPS代理
+        if let Ok(https_proxy) = env::var(HTTPS_PROXY_ENV_KEY) {
+            if let Ok(proxy) = reqwest::Proxy::https(&https_proxy) {
+                builder = builder.proxy(proxy);
+            }
         }
         Client {
             // Does it ever make sense for api_key and secret_key to be ""?

@@ -23,6 +23,7 @@ pub static AGGREGATED_TRADE: &str = "aggTrade";
 pub static DEPTH_ORDERBOOK: &str = "depthUpdate";
 pub static PARTIAL_ORDERBOOK: &str = "lastUpdateId";
 pub static DAYTICKER: &str = "24hrTicker";
+pub static MARK_PRICE: &str = "markPrice";
 
 pub fn all_ticker_stream() -> &'static str { "!ticker@arr" }
 
@@ -41,6 +42,12 @@ pub fn all_book_ticker_stream() -> &'static str { "!bookTicker" }
 pub fn all_mini_ticker_stream() -> &'static str { "!miniTicker@arr" }
 
 pub fn mini_ticker_stream(symbol: &str) -> String { format!("{symbol}@miniTicker") }
+
+/// # Arguments
+///
+/// * `symbol`: the market symbol
+/// * `update_speed`: 1 or 3
+pub fn mark_price_stream(symbol: &str, update_speed: u8) -> String { format!("{symbol}@markPrice@{update_speed}s") }
 
 /// # Arguments
 ///
@@ -118,6 +125,14 @@ impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
 
         self.handle_connect(url).await
     }
+
+    /// Connect to a futures websocket endpoint
+    pub async fn connect_futures(&mut self, endpoint: &str) -> Result<()> {
+        let wss: String = format!("{}/{}/{}", self.conf.futures_ws_endpoint, WS_ENDPOINT, endpoint);
+        let url = Url::parse(&wss)?;
+
+        self.handle_connect(url).await
+    }
     async fn handle_connect(&mut self, url: Url) -> Result<()> {
         // 检查是否存在 WSS_PROXY 环境变量
         if let Ok(proxy_addr) = std::env::var(WSS_PROXY_ENV_KEY) {
@@ -145,6 +160,8 @@ impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
             }
         }
     }
+
+    /// Disconnect from the endpoint
     pub async fn disconnect(&mut self) -> Result<()> {
         if let Some(ref mut connection) = self.socket {
             // 根据连接类型处理断开连接

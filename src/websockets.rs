@@ -72,7 +72,7 @@ pub enum WebSocketConnection {
     Proxies(WebSocketStream<MaybeTlsStream<Socks5Stream<tokio::net::TcpStream>>>, Response),
 }
 
-const WSS_PROXY_ENV_KEY: &str = "WSS_PROXY";
+pub const WSS_PROXY_ENV_KEY: &str = "WSS_PROXY";
 
 pub struct WebSockets<'a, WE> {
     //pub socket: Option<(WebSocketStream<MaybeTlsStream<S>>, Response)>,

@@ -1,5 +1,5 @@
 pub static DATA_REST_ENDPOINT: &str = "https://api.binance.com";
-
+pub const WSS_PROXY_ENV_KEY: &str = "WSS_PROXY";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub rest_api_endpoint: String,

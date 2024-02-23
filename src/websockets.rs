@@ -6,11 +6,14 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::handshake::client::Response;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::{connect_async, MaybeTlsStream};
+use tokio_tungstenite::{connect_async, MaybeTlsStream, client_async_tls};
 use url::Url;
 
-use crate::config::Config;
+use crate::config::{Config, WSS_PROXY_ENV_KEY};
 use crate::errors::*;
+
+use fast_socks5::client::{Socks5Stream, Config as Socks5Config};
+
 
 pub static STREAM_ENDPOINT: &str = "stream";
 pub static WS_ENDPOINT: &str = "ws";
@@ -125,12 +128,24 @@ impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
     }
 
     async fn handle_connect(&mut self, url: Url) -> Result<()> {
-        match connect_async(url).await {
-            Ok(answer) => {
-                self.socket = Some(answer);
-                Ok(())
+        if let Ok(proxy_addr) = std::env::var(WSS_PROXY_ENV_KEY) {
+            let proxy_stream = Socks5Stream::connect(proxy_addr, url.host_str().unwrap().to_string(), url.port_or_known_default().unwrap(), Socks5Config::default()).await
+                .map_err(|e| Error::Msg(format!("Error creating proxy stream: {e}")))?;
+            match client_async_tls(url, proxy_stream.get_socket()).await {
+                Ok(answer) => {
+                    self.socket = Some(answer);
+                    Ok(())
+                },
+                Err(e) => Err(Error::Msg(format!("Error during handshake: {e}"))),
             }
-            Err(e) => Err(Error::Msg(format!("Error during handshake {e}"))),
+        } else {
+            match connect_async(url).await {
+                Ok(answer) => {
+                    self.socket = Some(answer);
+                    Ok(())
+                }
+                Err(e) => Err(Error::Msg(format!("Error during handshake {e}"))),
+            }
         }
     }
 

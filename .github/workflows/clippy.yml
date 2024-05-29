@@ -2,15 +2,34 @@ on: push
 name: Clippy check
 jobs:
   clippy_check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        rust_channel:
+          - stable
+          - nightly
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly
           components: clippy
-          override: true
-      - uses: actions-rs/clippy-check@v1
+      - run: rustup --version
+      - uses: actions/checkout@v4
+      - run: rustup toolchain add --profile=minimal ${{ matrix.rust_channel }}
+      - name: Cargo cache
+        uses: swatinem/rust-cache@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --all-targets -- -D warnings
+          cache-on-failure: true
+      - name: Install SARIF tools
+        run: cargo install clippy-sarif sarif-fmt
+      - name: Run clippy
+        run: >
+          cargo clippy --all-features --all --message-format=json -- -D warnings
+          | clippy-sarif
+          | tee clippy-results.sarif
+          | sarif-fmt
+        continue-on-error: true
+      - name: Upload analysis results to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: clippy-results.sarif
+          wait-for-processing: true

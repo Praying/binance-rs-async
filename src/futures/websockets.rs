@@ -2,16 +2,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 use serde_json::from_str;
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::handshake::client::Response;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::client_async_tls;
-use tokio_tungstenite::connect_async;
-use fast_socks5::client::{Socks5Stream, Config as Socks5Config};
-
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::{connect_async, MaybeTlsStream, client_async_tls};
 use url::Url;
 
-use crate::config::Config;
+use crate::config::{Config, WSS_PROXY_ENV_KEY};
 use crate::errors::*;
-use crate::websockets::WebSocketConnection;
+
+use fast_socks5::client::{Socks5Stream, Config as Socks5Config};
 
 pub static STREAM_ENDPOINT: &str = "stream";
 pub static WS_ENDPOINT: &str = "ws";
@@ -47,7 +48,6 @@ pub fn mini_ticker_stream(symbol: &str) -> String { format!("{symbol}@miniTicker
 /// * `symbol`: the market symbol
 /// * `update_speed`: 1 or 3
 pub fn mark_price_stream(symbol: &str, update_speed: u8) -> String { format!("{symbol}@markPrice@{update_speed}s") }
-
 /// # Arguments
 ///
 /// * `symbol`: the market symbol
@@ -65,17 +65,17 @@ pub fn diff_book_depth_stream(symbol: &str, update_speed: u16) -> String { forma
 
 fn combined_stream(streams: Vec<String>) -> String { streams.join("/") }
 
-pub struct FuturesWebSockets<'a, WE> {
-    pub socket: Option<WebSocketConnection>,
+pub struct WebSockets<'a, WE> {
+    pub socket: Option<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)>,
     handler: Box<dyn FnMut(WE) -> Result<()> + 'a + Send>,
     conf: Config,
 }
 
-impl<'a, WE: serde::de::DeserializeOwned> FuturesWebSockets<'a, WE> {
+impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
     /// New websocket holder with default configuration
     /// # Examples
     /// see examples/binance_websockets.rs
-    pub fn new<Callback>(handler: Callback) -> FuturesWebSockets<'a, WE>
+    pub fn new<Callback>(handler: Callback) -> WebSockets<'a, WE>
     where
         Callback: FnMut(WE) -> Result<()> + 'a + Send,
     {
@@ -85,11 +85,11 @@ impl<'a, WE: serde::de::DeserializeOwned> FuturesWebSockets<'a, WE> {
     /// New websocket holder with provided configuration
     /// # Examples
     /// see examples/binance_websockets.rs
-    pub fn new_with_options<Callback>(handler: Callback, conf: Config) -> FuturesWebSockets<'a, WE>
+    pub fn new_with_options<Callback>(handler: Callback, conf: Config) -> WebSockets<'a, WE>
     where
         Callback: FnMut(WE) -> Result<()> + 'a + Send,
     {
-        FuturesWebSockets {
+        WebSockets {
             socket: None,
             handler: Box::new(handler),
             conf,
@@ -99,7 +99,7 @@ impl<'a, WE: serde::de::DeserializeOwned> FuturesWebSockets<'a, WE> {
     /// Connect to multiple websocket endpoints
     /// N.B: WE has to be CombinedStreamEvent
     pub async fn connect_multiple(&mut self, endpoints: Vec<String>) -> Result<()> {
-        let mut url = Url::parse(&self.conf.ws_endpoint)?;
+        let mut url = Url::parse(&self.conf.futures_ws_endpoint)?;
         url.path_segments_mut()
             .map_err(|_| Error::UrlParserError(url::ParseError::RelativeUrlWithoutBase))?
             .push(STREAM_ENDPOINT);
@@ -117,28 +117,22 @@ impl<'a, WE: serde::de::DeserializeOwned> FuturesWebSockets<'a, WE> {
     }
 
     async fn handle_connect(&mut self, url: Url) -> Result<()> {
-        // 检查是否存在 WSS_PROXY 环境变量
-        if let Ok(proxy_addr) = std::env::var(crate::websockets::WSS_PROXY_ENV_KEY) {
-            // 使用 fast_socks5 建立代理流
+        if let Ok(proxy_addr) = std::env::var(WSS_PROXY_ENV_KEY) {
             let proxy_stream = Socks5Stream::connect(proxy_addr, url.host_str().unwrap().to_string(), url.port_or_known_default().unwrap(), Socks5Config::default()).await
                 .map_err(|e| Error::Msg(format!("Error creating proxy stream: {e}")))?;
-
-            // 用 proxy_stream 替换直接的 connect_async 调用
-            match client_async_tls(url, proxy_stream).await {
-                Ok((stream, response)) => {
-                    // 使用 Proxied 枚举变体
-                    self.socket = Some(WebSocketConnection::Proxies(stream, response));
+            match client_async_tls(url, proxy_stream.get_socket()).await {
+                Ok(answer) => {
+                    self.socket = Some(answer);
                     Ok(())
                 },
                 Err(e) => Err(Error::Msg(format!("Error during handshake: {e}"))),
             }
         } else {
             match connect_async(url).await {
-                Ok((stream, response)) => {
-                    // 使用 Direct 枚举变体
-                    self.socket = Some(WebSocketConnection::Direct(stream, response));
+                Ok(answer) => {
+                    self.socket = Some(answer);
                     Ok(())
-                },
+                }
                 Err(e) => Err(Error::Msg(format!("Error during handshake {e}"))),
             }
         }
@@ -146,57 +140,35 @@ impl<'a, WE: serde::de::DeserializeOwned> FuturesWebSockets<'a, WE> {
 
     /// Disconnect from the endpoint
     pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(ref mut connection) = self.socket {
-            // 根据连接类型处理断开连接
-            match connection {
-                WebSocketConnection::Direct(ref mut socket, _) => {
-                    socket.close(None).await?;
-                },
-                WebSocketConnection::Proxies(ref mut socket, _) => {
-                    socket.close(None).await?;
-                },
-            }
+        if let Some(ref mut socket) = self.socket {
+            socket.0.close(None).await?;
             Ok(())
         } else {
             Err(Error::Msg("Not able to close the connection".to_string()))
         }
     }
 
-    pub fn socket(&self) -> &Option<WebSocketConnection> { &self.socket }
+    pub fn socket(&self) -> &Option<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)> { &self.socket }
 
     pub async fn event_loop(&mut self, running: &AtomicBool) -> Result<()> {
         while running.load(Ordering::Relaxed) {
-            if let Some(ref mut connection) = self.socket {
-                // 获取 trait 对象
-                match connection {
-                    WebSocketConnection::Direct(ref mut socket, _) => {
-                        if let Some(message) = socket.next().await {
-                            self.process_message(message?).await?;
-                        }
-                    }
-                    WebSocketConnection::Proxies(ref mut socket, _) => {
-                        if let Some(message) = socket.next().await {
-                            self.process_message(message?).await?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
+            if let Some((ref mut socket, _)) = self.socket {
+                // TODO: return error instead of panic?
+                let message = socket.next().await.unwrap()?;
 
-    async fn process_message(&mut self, message: Message) -> Result<()> {
-        match message {
-            Message::Text(msg) => {
-                if msg.is_empty() {
-                    return Ok(());
+                match message {
+                    Message::Text(msg) => {
+                        if msg.is_empty() {
+                            return Ok(());
+                        }
+                        let event: WE = from_str(msg.as_str())?;
+                        (self.handler)(event)?;
+                    }
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+                    Message::Close(e) => {
+                        return Err(Error::Msg(format!("Disconnected {e:?}")));
+                    }
                 }
-                let event: WE = from_str(msg.as_str())?;
-                (self.handler)(event)?;
-            }
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
-            Message::Close(e) => {
-                return Err(Error::Msg(format!("Disconnected {e:?}")));
             }
         }
         Ok(())

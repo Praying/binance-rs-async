@@ -1,6 +1,5 @@
 use std::ops::Not;
 
-use boolinator::Boolinator;
 use chrono::{Duration, Utc};
 use serde_json::Value;
 
@@ -28,7 +27,11 @@ pub fn build_signed_request(
 ) -> Result<String> {
     let s = IntoIterator::into_iter([
         // Include recvWindow if window > 0
-        (recv_window > 0).as_option().map(|_| ("recvWindow", recv_window)),
+        if recv_window > 0 {
+            Some(("recvWindow", recv_window))
+        } else {
+            None
+        },
         // Always include timestamp
         Some(("timestamp", get_timestamp()?)),
     ])
@@ -54,7 +57,11 @@ where
 
     let s = IntoIterator::into_iter([
         // Include recvWindow if window > 0
-        (recv_window > 0).as_option().map(|_| ("recvWindow", recv_window)),
+        if recv_window > 0 {
+            Some(("recvWindow", recv_window))
+        } else {
+            None
+        },
         // Always include timestamp
         Some(("timestamp", get_timestamp()?)),
     ])

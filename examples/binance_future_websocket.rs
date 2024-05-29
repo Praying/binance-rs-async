@@ -2,8 +2,8 @@
 extern crate tokio;
 
 use binance::api::*;
-use binance::userstream::*;
-use binance::websockets::*;
+use binance::futures::userstream::*;
+use binance::futures::websockets::*;
 use binance::ws_model::{CombinedStreamEvent, WebsocketEvent, WebsocketEventUntag};
 use futures::future::BoxFuture;
 use futures::stream::StreamExt;
@@ -208,7 +208,9 @@ async fn mark_price_websocket(logger_tx: UnboundedSender<WebsocketEvent>) {
         Ok(())
     });
 
-    if let Err(e) = web_socket.connect_futures(&mark_price).await {
+
+
+    if let Err(e) = web_socket.connect(&mark_price).await {
         println!("Connection error: {e}");
     }
 
@@ -323,16 +325,20 @@ async fn custom_event_loop(logger_tx: UnboundedSender<WebsocketEvent>) {
         });
     web_socket.connect_multiple(streams).await.unwrap(); // check error
     loop {
-        if let Some((ref mut connection)) = web_socket.socket {
-            match connection {
-                WebSocketConnection::Direct(ref mut socket, _) => {
-                    if let Some(message) = socket.next().await {
-                        custom_process_message(message.unwrap()).await.unwrap();
+        if let Some((ref mut socket, _)) = web_socket.socket {
+            if let Ok(message) = socket.next().await.unwrap() {
+                match message {
+                    Message::Text(msg) => {
+                        if msg.is_empty() {
+                            continue;
+                        }
+                        let event: CombinedStreamEvent<WebsocketEventUntag> = from_str(msg.as_str()).unwrap();
+                        eprintln!("event = {event:?}");
                     }
-                }
-                WebSocketConnection::Proxies(ref mut socket, _) => {
-                    if let Some(message) = socket.next().await {
-                        custom_process_message(message.unwrap()).await.unwrap();
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+                    Message::Close(e) => {
+                        eprintln!("closed stream = {e:?}");
+                        break;
                     }
                 }
             }

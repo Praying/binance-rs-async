@@ -7,11 +7,13 @@ use tokio_tungstenite::tungstenite::handshake::client::Response;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, client_async_tls};
-use fast_socks5::client::{Socks5Stream, Config as Socks5Config};
 use url::Url;
 
-use crate::config::Config;
+use crate::config::{Config, WSS_PROXY_ENV_KEY};
 use crate::errors::*;
+
+use fast_socks5::client::{Socks5Stream, Config as Socks5Config};
+
 
 pub static STREAM_ENDPOINT: &str = "stream";
 pub static WS_ENDPOINT: &str = "ws";
@@ -66,17 +68,8 @@ pub fn diff_book_depth_stream(symbol: &str, update_speed: u16) -> String { forma
 
 fn combined_stream(streams: Vec<String>) -> String { streams.join("/") }
 
-// 定义一个枚举来表示不同类型的 WebSocket 连接
-pub enum WebSocketConnection {
-    Direct(WebSocketStream<MaybeTlsStream<TcpStream>>, Response),
-    Proxies(WebSocketStream<MaybeTlsStream<Socks5Stream<tokio::net::TcpStream>>>, Response),
-}
-
-pub const WSS_PROXY_ENV_KEY: &str = "WSS_PROXY";
-
 pub struct WebSockets<'a, WE> {
-    //pub socket: Option<(WebSocketStream<MaybeTlsStream<S>>, Response)>,
-    pub socket: Option<WebSocketConnection>,
+    pub socket: Option<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)>,
     handler: Box<dyn FnMut(WE) -> Result<()> + 'a + Send>,
     conf: Config,
 }
@@ -133,29 +126,24 @@ impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
 
         self.handle_connect(url).await
     }
+
     async fn handle_connect(&mut self, url: Url) -> Result<()> {
-        // 检查是否存在 WSS_PROXY 环境变量
         if let Ok(proxy_addr) = std::env::var(WSS_PROXY_ENV_KEY) {
-            // 使用 fast_socks5 建立代理流
             let proxy_stream = Socks5Stream::connect(proxy_addr, url.host_str().unwrap().to_string(), url.port_or_known_default().unwrap(), Socks5Config::default()).await
                 .map_err(|e| Error::Msg(format!("Error creating proxy stream: {e}")))?;
-
-            // 用 proxy_stream 替换直接的 connect_async 调用
-            match client_async_tls(url, proxy_stream).await {
-                Ok((stream, response)) => {
-                    // 使用 Proxied 枚举变体
-                    self.socket = Some(WebSocketConnection::Proxies(stream, response));
+            match client_async_tls(url, proxy_stream.get_socket()).await {
+                Ok(answer) => {
+                    self.socket = Some(answer);
                     Ok(())
                 },
                 Err(e) => Err(Error::Msg(format!("Error during handshake: {e}"))),
             }
         } else {
             match connect_async(url).await {
-                Ok((stream, response)) => {
-                    // 使用 Direct 枚举变体
-                    self.socket = Some(WebSocketConnection::Direct(stream, response));
+                Ok(answer) => {
+                    self.socket = Some(answer);
                     Ok(())
-                },
+                }
                 Err(e) => Err(Error::Msg(format!("Error during handshake {e}"))),
             }
         }
@@ -163,56 +151,33 @@ impl<'a, WE: serde::de::DeserializeOwned> WebSockets<'a, WE> {
 
     /// Disconnect from the endpoint
     pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(ref mut connection) = self.socket {
-            // 根据连接类型处理断开连接
-            match connection {
-                WebSocketConnection::Direct(ref mut socket, _) => {
-                    socket.close(None).await?;
-                },
-                WebSocketConnection::Proxies(ref mut socket, _) => {
-                    socket.close(None).await?;
-                },
-            }
+        if let Some(ref mut socket) = self.socket {
+            socket.0.close(None).await?;
             Ok(())
         } else {
             Err(Error::Msg("Not able to close the connection".to_string()))
         }
     }
-    //pub fn socket(&self) -> &Option<(WebSocketStream<MaybeTlsStream<S>>, Response)> { &self.socket }
-    pub fn socket(&self) -> Option<&WebSocketConnection> {
-        self.socket.as_ref()
-    }
 
-    async fn process_message(&mut self, message: Message) -> Result<()> {
-        match message {
-            Message::Text(msg) => {
-                if msg.is_empty() {
-                    return Ok(());
-                }
-                let event: WE = from_str(msg.as_str())?;
-                (self.handler)(event)?;
-            }
-            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
-            Message::Close(e) => {
-                return Err(Error::Msg(format!("Disconnected {e:?}")));
-            }
-        }
-        Ok(())
-    }
+    pub fn socket(&self) -> &Option<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)> { &self.socket }
+
     pub async fn event_loop(&mut self, running: &AtomicBool) -> Result<()> {
         while running.load(Ordering::Relaxed) {
-            if let Some(ref mut connection) = self.socket {
-                // 获取 trait 对象
-                match connection {
-                    WebSocketConnection::Direct(ref mut socket, _) => {
-                        if let Some(message) = socket.next().await {
-                            self.process_message(message?).await?;
+            if let Some((ref mut socket, _)) = self.socket {
+                // TODO: return error instead of panic?
+                let message = socket.next().await.unwrap()?;
+
+                match message {
+                    Message::Text(msg) => {
+                        if msg.is_empty() {
+                            return Ok(());
                         }
+                        let event: WE = from_str(msg.as_str())?;
+                        (self.handler)(event)?;
                     }
-                    WebSocketConnection::Proxies(ref mut socket, _) => {
-                        if let Some(message) = socket.next().await {
-                            self.process_message(message?).await?;
-                        }
+                    Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => {}
+                    Message::Close(e) => {
+                        return Err(Error::Msg(format!("Disconnected {e:?}")));
                     }
                 }
             }

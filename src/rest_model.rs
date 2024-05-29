@@ -1221,6 +1221,25 @@ pub enum SymbolPermission {
     Other,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ExecutionType {
+    /// The order has been accepted into the engine.
+    New,
+    /// The order has been canceled by the user.
+    Canceled,
+    /// Currently unused
+    Replaced,
+    /// The order has been rejected and was not processed (This message appears only with Cancel Replace Orders wherein the new order placement is rejected but the request to cancel request succeeds.)
+    Rejected,
+    /// Part of the order or all of the order's quantity has filled.
+    Trade,
+    /// The order was canceled according to the order type's rules (e.g. LIMIT FOK orders with no fill, LIMIT IOC or MARKET orders that partially fill) or by the exchange, (e.g. orders canceled during liquidation, orders canceled during maintenance).
+    Expired,
+    /// The order has expired due to STP trigger.
+    TradePrevention,
+}
+
 /// Status of an order, this can typically change over time
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -1233,14 +1252,14 @@ pub enum OrderStatus {
     Filled,
     /// The order has been canceled by the user.
     Canceled,
-    /// (currently unused)
+    /// Currently unused
     PendingCancel,
     /// The order was not accepted by the engine and not processed.
     Rejected,
     /// The order was canceled according to the order type's rules (e.g. LIMIT FOK orders with no fill, LIMIT IOC or MARKET orders that partially fill) or by the exchange, (e.g. orders canceled during liquidation, orders canceled during maintenance)
     Expired,
-    /// Part of the order or all of the order's quantity has filled.
-    Trade,
+    /// The order was canceled by the exchange due to STP trigger. (e.g. an order with EXPIRE_TAKER will match with existing orders on the book with the same account or same tradeGroupId)
+    ExpiredInMatch,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -1993,7 +2012,7 @@ pub mod string_or_float {
 pub(crate) mod string_or_float_opt {
     use std::fmt;
 
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserializer, Serializer};
 
     pub fn serialize<T, S>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -2010,13 +2029,6 @@ pub(crate) mod string_or_float_opt {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum StringOrFloat {
-            String(String),
-            Float(f64),
-        }
-
         Ok(Some(crate::rest_model::string_or_float::deserialize(deserializer)?))
     }
 }
@@ -2080,7 +2092,7 @@ pub mod string_or_u64_opt {
         }
 
         match StringOrU64::deserialize(deserializer)? {
-            StringOrU64::String(s) => s.parse().map_err(de::Error::custom).map(|v| Some(v)),
+            StringOrU64::String(s) => s.parse().map_err(de::Error::custom).map(Some),
             StringOrU64::U64(i) => Ok(Some(i)),
         }
     }

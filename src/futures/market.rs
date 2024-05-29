@@ -422,7 +422,7 @@ impl FuturesMarket {
             end_time: end_time.into(),
             limit: limit.into(),
             pair: symbol.into(),
-            interval: Some(interval.into())
+            interval: Some(interval.into()),
         };
 
         let klines = self.client.get_d("/fapi/v1/indexPriceKlines", Some(query)).await?;
@@ -508,7 +508,7 @@ impl FuturesMarket {
         S: Into<String>,
     {
         self.client
-            .get_d("/fapi/v1/ticker/price", Some(PairQuery { symbol: symbol.into() }))
+            .get_d("/fapi/v2/ticker/price", Some(PairQuery { symbol: symbol.into() }))
             .await
     }
 
